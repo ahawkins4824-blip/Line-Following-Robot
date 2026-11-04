@@ -1,0 +1,250 @@
+const uint8_t LED_PIN  = PIN_PD7;
+const uint8_t MOTOR_LEFT = PIN_PA3;
+const uint8_t MOTOR_RIGHT = PIN_PA2;
+const uint8_t SENSOR_1 = PIN_PD1;
+const uint8_t SENSOR_2 = PIN_PD2;
+const uint8_t SENSOR_3 = PIN_PD3;
+const uint8_t SENSOR_4 = PIN_PD4;
+const uint8_t SENSOR_5 = PIN_PD5;
+
+unsigned long prevTime = 0;
+
+int sensor[5];
+int sensorcal[5];
+
+float turnAmount = 0;
+
+float kp = 18;
+float kd = 0;
+
+float correction = 0;
+
+float err = 0;
+float prev_err = 0;
+
+int leftSpeed = 0;
+int rightSpeed = 0;
+
+float derivative = 0;
+
+float position = 0;
+float lastKnownPosition = 0;
+
+bool lineLost = false;
+bool wasLineLost = false;
+
+int currentBaseSpeed;
+
+int lastDirection = 1;
+
+int maxSensor = 0;
+int maxSensorIndex = 0;
+
+const int LINE_THRESHOLD = 850;
+
+int baseSpeed = 100;
+
+const int KICK_PWM = 140;
+const unsigned long KICK_MS = 150;
+
+unsigned long lostStart = 0;
+
+
+// -------------------------------------------------
+// STARTUP KICK
+// -------------------------------------------------
+
+void rampMotors()
+{
+    analogWrite(MOTOR_LEFT, KICK_PWM);
+    analogWrite(MOTOR_RIGHT, KICK_PWM);
+    delay(KICK_MS);
+
+    analogWrite(MOTOR_LEFT, baseSpeed);
+    analogWrite(MOTOR_RIGHT, baseSpeed);
+}
+
+
+// -------------------------------------------------
+// SETUP
+// -------------------------------------------------
+
+void setup()
+{
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(MOTOR_LEFT, OUTPUT);
+    pinMode(MOTOR_RIGHT, OUTPUT);
+
+    digitalWrite(LED_PIN, LOW);
+
+    analogWrite(MOTOR_RIGHT, 0);
+    analogWrite(MOTOR_LEFT, 0);
+
+    // Startup LED flashes
+    for (size_t i = 0; i < 3; i++) {
+
+        digitalWrite(LED_PIN, HIGH);
+        delay(500);
+
+        digitalWrite(LED_PIN, LOW);
+        delay(500);
+    }
+
+    Serial.begin(115200);
+
+    // Kick both motors, then settle
+    rampMotors();
+
+    prevTime = micros();
+}
+
+// -------------------------------------------------
+// READ SENSORS
+// -------------------------------------------------
+
+void read_sensors() // sensor values to match physical array
+{
+    sensor[0] = analogRead(SENSOR_4);
+    sensor[1] = analogRead(SENSOR_5);
+    sensor[2] = analogRead(SENSOR_1);
+    sensor[3] = analogRead(SENSOR_2);
+    sensor[4] = analogRead(SENSOR_3);
+}
+
+
+// -------------------------------------------------
+// CALIBRATE SENSORS
+// -------------------------------------------------
+
+void calibrate() // use sensor values to set either at 0 or 1000 based on predetermined thresholds
+{
+    int white[5] = {967, 967, 969, 971, 972};
+    int black[5] = {336, 288, 423, 373, 352};
+
+    for (int i = 0; i < 5; i++) {
+
+        sensorcal[i] = map(
+            sensor[i],
+            black[i],
+            white[i],
+            0,
+            1000
+        );
+
+        sensorcal[i] = constrain(sensorcal[i], 0, 1000);
+    }
+}
+
+// -------------------------------------------------
+// FIND STRONGEST SENSOR
+// -------------------------------------------------
+
+void find_max() // find the max sensor and then set position
+{
+    maxSensor = sensorcal[0];
+    maxSensorIndex = 0;
+
+    for (int i = 1; i < 5; i++) {
+
+        if (sensorcal[i] > maxSensor) {
+
+            maxSensor = sensorcal[i];
+            maxSensorIndex = i;
+        }
+    }
+
+    if (maxSensor > LINE_THRESHOLD) {
+        switch (maxSensorIndex) {
+            case 0:
+                position = 2.0;
+                break;
+
+            case 1:
+                position = 1.0;
+                break;
+
+            case 2:
+                position = 0.0;
+                break;
+
+            case 3:
+                position = -1.0;
+                break;
+
+            case 4:
+                position = -2.0;
+                break;
+        }
+        lastKnownPosition = position;
+        lineLost = false;
+    } else {
+        lineLost = true;
+    }
+}
+
+// -------------------------------------------------
+// CONTROLLER
+// -------------------------------------------------
+
+void controller() // PD controller with line lost functionality to find line again
+{
+    // Remember which side the line was last seen on
+    if (!lineLost) {
+
+        if (position > 0.05) {
+
+            lastDirection = 1;
+
+        } else if (position < -0.05) {
+
+            lastDirection = -1;
+        }
+    }
+
+    // If line is lost, turn towards last known direction
+
+    if (lineLost) {
+
+        if (!wasLineLost) lostStart = millis();      // wasLineLost still holds the previous loop's value here
+        float t = (millis() - lostStart) / 1000.0f;
+        float strength = max(0.6f, 2.1f - 0.8f * t); // 2.1 -> 0.6 over about 2 s spirals outward to find line
+        position = strength * lastDirection;
+    }
+
+    err = position;
+    wasLineLost = lineLost;
+
+    correction = kp * err; // Kd wa removed as only negligible or negative effect occuring
+    correction = constrain(correction, -80, 80);
+
+    turnAmount = abs(position);
+
+    currentBaseSpeed = (fabs(position) >= 1.0) ? 66 : baseSpeed;  // slow down when the line is at the outer sensors
+
+    leftSpeed = currentBaseSpeed - correction;
+    rightSpeed = currentBaseSpeed + correction;
+
+    leftSpeed = constrain(leftSpeed, 0, 255);
+    rightSpeed = constrain(rightSpeed, 0, 255);
+
+    analogWrite(MOTOR_LEFT, leftSpeed);
+    analogWrite(MOTOR_RIGHT, rightSpeed);
+}
+
+
+// -------------------------------------------------
+// MAIN LOOP
+// -------------------------------------------------
+
+void loop()
+{
+    read_sensors();
+
+    calibrate();
+
+    find_max();
+
+    controller();
+
+    digitalWrite(LED_PIN, HIGH);
+}
